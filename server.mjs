@@ -280,6 +280,102 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// API: macro regime classification for QID bot fleet
+app.get('/api/regime', (req, res) => {
+  if (!currentData) return res.status(503).json({ error: 'No data yet — first sweep in progress' });
+
+  const markets = currentData.markets || {};
+  const vix = markets.vix || {};
+  const energy = currentData.energy || {};
+  const acled = currentData.acled || {};
+
+  // Extract key values
+  const vixValue = vix.value ?? null;
+  const vixChange = vix.changePct ?? null;
+  const wti = energy.wti ?? null;
+  const wtiRecent = energy.wtiRecent || [];
+  const wtiDayChangePct = wtiRecent.length >= 2
+    ? ((wtiRecent[wtiRecent.length - 1] - wtiRecent[wtiRecent.length - 2]) / wtiRecent[wtiRecent.length - 2] * 100)
+    : null;
+
+  // S&P 500 day change
+  const sp500 = (markets.indexes || []).find(i => i.symbol === '^GSPC');
+  const sp500ChangePct = sp500?.changePct ?? null;
+
+  // Bonds (TLT as proxy for 20Y+)
+  const tlt = (markets.rates || []).find(r => r.symbol === 'TLT');
+  const tltChangePct = tlt?.changePct ?? null;
+
+  // HY spread proxy (HYG ETF — inverse relationship: HYG down = spreads widening = stress)
+  const hyg = (markets.rates || []).find(r => r.symbol === 'HYG');
+  const hygChangePct = hyg?.changePct ?? null;
+
+  // Conflict intensity from ACLED
+  const conflictEvents = acled.totalEvents ?? 0;
+  const conflictFatalities = acled.totalFatalities ?? 0;
+
+  // --- Regime classification ---
+  let regime = 'normal';
+  let regimeReasons = [];
+
+  // Chaos: oil surging + equities dumping + bonds dumping (panic liquidation)
+  if (wtiDayChangePct !== null && sp500ChangePct !== null && tltChangePct !== null) {
+    if (wtiDayChangePct >= 2.0 && sp500ChangePct <= -1.0 && tltChangePct <= -0.3) {
+      regime = 'chaos';
+      regimeReasons.push(`oil +${wtiDayChangePct.toFixed(1)}%, S&P ${sp500ChangePct.toFixed(1)}%, bonds ${tltChangePct.toFixed(1)}%`);
+    }
+  }
+
+  // Fear: VIX elevated
+  if (regime === 'normal' && vixValue !== null) {
+    if (vixValue >= 30) {
+      regime = 'fear';
+      regimeReasons.push(`VIX ${vixValue.toFixed(1)} (>=30)`);
+    } else if (vixValue >= 25) {
+      regime = 'elevated';
+      regimeReasons.push(`VIX ${vixValue.toFixed(1)} (>=25)`);
+    }
+  }
+
+  // Grind: low vol, tight spreads
+  if (regime === 'normal' && vixValue !== null) {
+    if (vixValue < 15) {
+      regime = 'grind';
+      regimeReasons.push(`VIX ${vixValue.toFixed(1)} (<15)`);
+    }
+  }
+
+  // VIX regime sub-classification
+  let vixRegime = 'normal';
+  if (vixValue !== null) {
+    if (vixValue >= 30) vixRegime = 'panic';
+    else if (vixValue >= 25) vixRegime = 'fear';
+    else if (vixValue >= 18) vixRegime = 'elevated';
+    else if (vixValue < 15) vixRegime = 'grind';
+  }
+
+  const sweepAge = lastSweepTime
+    ? Math.floor((Date.now() - new Date(lastSweepTime).getTime()) / 60000)
+    : null;
+
+  res.json({
+    regime,
+    regime_reasons: regimeReasons,
+    vix: vixValue,
+    vix_change_pct: vixChange,
+    vix_regime: vixRegime,
+    sp500_change_pct: sp500ChangePct,
+    wti: wti,
+    wti_day_change_pct: wtiDayChangePct !== null ? parseFloat(wtiDayChangePct.toFixed(2)) : null,
+    tlt_change_pct: tltChangePct,
+    hyg_change_pct: hygChangePct,
+    conflict_events: conflictEvents,
+    conflict_fatalities: conflictFatalities,
+    sweep_age_minutes: sweepAge,
+    last_sweep: lastSweepTime,
+  });
+});
+
 // API: available locales
 app.get('/api/locales', (req, res) => {
   res.json({
