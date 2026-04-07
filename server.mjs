@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { exec } from 'child_process';
+import pg from 'pg';
 import config from './crucix.config.mjs';
 import { getLocale, currentLanguage, getSupportedLocales } from './lib/i18n.mjs';
 import { fullBriefing } from './apis/briefing.mjs';
@@ -280,16 +281,15 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// API: macro regime classification for QID bot fleet
-app.get('/api/regime', (req, res) => {
-  if (!currentData) return res.status(503).json({ error: 'No data yet — first sweep in progress' });
+// Compute regime classification from current sweep data
+function computeRegime(data) {
+  if (!data) return null;
 
-  const markets = currentData.markets || {};
+  const markets = data.markets || {};
   const vix = markets.vix || {};
-  const energy = currentData.energy || {};
-  const acled = currentData.acled || {};
+  const energy = data.energy || {};
+  const acled = data.acled || {};
 
-  // Extract key values
   const vixValue = vix.value ?? null;
   const vixChange = vix.changePct ?? null;
   const wti = energy.wti ?? null;
@@ -298,23 +298,15 @@ app.get('/api/regime', (req, res) => {
     ? ((wtiRecent[wtiRecent.length - 1] - wtiRecent[wtiRecent.length - 2]) / wtiRecent[wtiRecent.length - 2] * 100)
     : null;
 
-  // S&P 500 day change
   const sp500 = (markets.indexes || []).find(i => i.symbol === '^GSPC');
   const sp500ChangePct = sp500?.changePct ?? null;
-
-  // Bonds (TLT as proxy for 20Y+)
   const tlt = (markets.rates || []).find(r => r.symbol === 'TLT');
   const tltChangePct = tlt?.changePct ?? null;
-
-  // HY spread proxy (HYG ETF — inverse relationship: HYG down = spreads widening = stress)
   const hyg = (markets.rates || []).find(r => r.symbol === 'HYG');
   const hygChangePct = hyg?.changePct ?? null;
-
-  // Conflict intensity from ACLED
   const conflictEvents = acled.totalEvents ?? 0;
   const conflictFatalities = acled.totalFatalities ?? 0;
 
-  // S&P intraday range (for logging, not gating)
   let sp500RangePct = null;
   if (sp500?.history?.length > 0) {
     const today = sp500.history[sp500.history.length - 1];
@@ -323,18 +315,13 @@ app.get('/api/regime', (req, res) => {
     }
   }
 
-  // --- Regime classification (data-driven from 61,707 eval backtest) ---
   // Strategy F: global 0.60 + short-only on energy shock
-  // Backtest: 875 trades, 53.3% WR, PF 1.14, +$254 (vs -$2,338 at flat 0.55)
-  // Priority order: chaos > energy_shock > elevated > fear > grind > normal
   let regime = 'normal';
   let regimeReasons = [];
-  let suppress = false;         // true = bots should suppress all entries
-  let biasDirection = null;     // null = both, "short" or "long" = directional bias
-  let thresholdAdjust = 0.60;   // global 0.60 — model only profitable above this
+  let suppress = false;
+  let biasDirection = null;
+  let thresholdAdjust = 0.60;
 
-  // 1. Chaos: oil surging + equities dumping + bonds dumping (panic liquidation)
-  //    Backtest: negative EV at every threshold across 3 sessions
   if (wtiDayChangePct !== null && sp500ChangePct !== null && tltChangePct !== null) {
     if (wtiDayChangePct >= 2.0 && sp500ChangePct <= -1.0 && tltChangePct <= -0.3) {
       regime = 'chaos';
@@ -342,36 +329,24 @@ app.get('/api/regime', (req, res) => {
       regimeReasons.push(`oil +${wtiDayChangePct.toFixed(1)}%, S&P ${sp500ChangePct.toFixed(1)}%, bonds ${tltChangePct.toFixed(1)}%`);
     }
   }
-
-  // 2. Energy shock: WTI up >2% — short-only bias at 0.60
-  //    Backtest: SHORT at 0.60 = 54.9% WR, PF 1.22, +$35 (vs LONG -$178)
-  //    Longs are fighting macro tide, shorts capture real selling flow
   if (regime === 'normal' && wtiDayChangePct !== null && wtiDayChangePct >= 2.0) {
     regime = 'energy_shock';
     biasDirection = 'short';
     regimeReasons.push(`WTI +${wtiDayChangePct.toFixed(1)}% (>+2% = short-only bias)`);
   }
-
-  // 3. Elevated: VIX 25-30 (worst VIX bucket in backtest)
-  //    Backtest: 42.9% WR, PF 0.75 — already handled by global 0.60 threshold
   if (regime === 'normal' && vixValue !== null && vixValue >= 25 && vixValue < 30) {
     regime = 'elevated';
     regimeReasons.push(`VIX ${vixValue.toFixed(1)} (25-30 danger zone)`);
   }
-
-  // 4. Fear: VIX >= 30 (model performs near baseline here, no adjustment needed)
   if (regime === 'normal' && vixValue !== null && vixValue >= 30) {
     regime = 'fear';
     regimeReasons.push(`VIX ${vixValue.toFixed(1)} (>=30)`);
   }
-
-  // 5. Grind: VIX < 15
   if (regime === 'normal' && vixValue !== null && vixValue < 15) {
     regime = 'grind';
     regimeReasons.push(`VIX ${vixValue.toFixed(1)} (<15)`);
   }
 
-  // VIX regime sub-classification
   let vixRegime = 'normal';
   if (vixValue !== null) {
     if (vixValue >= 30) vixRegime = 'panic';
@@ -380,27 +355,77 @@ app.get('/api/regime', (req, res) => {
     else if (vixValue < 15) vixRegime = 'grind';
   }
 
+  return {
+    regime, regime_reasons: regimeReasons, suppress, bias_direction: biasDirection,
+    threshold: thresholdAdjust, vix: vixValue, vix_change_pct: vixChange,
+    vix_regime: vixRegime, sp500_change_pct: sp500ChangePct, sp500_range_pct: sp500RangePct,
+    wti, wti_day_change_pct: wtiDayChangePct !== null ? parseFloat(wtiDayChangePct.toFixed(2)) : null,
+    tlt_change_pct: tltChangePct, hyg_change_pct: hygChangePct,
+    conflict_events: conflictEvents, conflict_fatalities: conflictFatalities,
+  };
+}
+
+// --- TSDB persistence ---
+const tsdbPool = new pg.Pool({
+  host: process.env.QID_DB_HOST || 'timescaledb.qid.svc.cluster.local',
+  port: parseInt(process.env.QID_DB_PORT || '5432'),
+  database: process.env.QID_DB_NAME || 'qid_analytics',
+  user: process.env.QID_DB_USER || 'qid',
+  password: process.env.QID_DB_PASSWORD || '',
+  max: 2,
+});
+
+async function persistSweep(regimeData, meta) {
+  try {
+    await tsdbPool.query(`
+      INSERT INTO macro_sweeps (
+        time, regime, regime_reasons, suppress, bias_direction, threshold,
+        vix, vix_change_pct, vix_regime, sp500_change_pct, sp500_range_pct,
+        wti, wti_day_change_pct, tlt_change_pct, hyg_change_pct,
+        conflict_events, conflict_fatalities,
+        sources_ok, sources_total, llm_ideas, news_count, sweep_duration_ms
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+    `, [
+      new Date().toISOString(),
+      regimeData.regime,
+      regimeData.regime_reasons,
+      regimeData.suppress,
+      regimeData.bias_direction,
+      regimeData.threshold,
+      regimeData.vix,
+      regimeData.vix_change_pct,
+      regimeData.vix_regime,
+      regimeData.sp500_change_pct,
+      regimeData.sp500_range_pct,
+      regimeData.wti,
+      regimeData.wti_day_change_pct,
+      regimeData.tlt_change_pct,
+      regimeData.hyg_change_pct,
+      regimeData.conflict_events,
+      regimeData.conflict_fatalities,
+      meta.sourcesOk || 0,
+      meta.sourcesQueried || 0,
+      meta.llmIdeas || 0,
+      meta.newsCount || 0,
+      meta.sweepDurationMs || null,
+    ]);
+    console.log(`[Crucix] Sweep persisted to TSDB (regime=${regimeData.regime})`);
+  } catch (err) {
+    console.error('[Crucix] TSDB persist failed:', err.message);
+  }
+}
+
+// API: macro regime classification for QID bot fleet
+app.get('/api/regime', (req, res) => {
+  const regimeData = computeRegime(currentData);
+  if (!regimeData) return res.status(503).json({ error: 'No data yet — first sweep in progress' });
+
   const sweepAge = lastSweepTime
     ? Math.floor((Date.now() - new Date(lastSweepTime).getTime()) / 60000)
     : null;
 
   res.json({
-    regime,
-    regime_reasons: regimeReasons,
-    suppress,
-    bias_direction: biasDirection,
-    threshold: thresholdAdjust,
-    vix: vixValue,
-    vix_change_pct: vixChange,
-    vix_regime: vixRegime,
-    sp500_change_pct: sp500ChangePct,
-    sp500_range_pct: sp500RangePct,
-    wti: wti,
-    wti_day_change_pct: wtiDayChangePct !== null ? parseFloat(wtiDayChangePct.toFixed(2)) : null,
-    tlt_change_pct: tltChangePct,
-    hyg_change_pct: hygChangePct,
-    conflict_events: conflictEvents,
-    conflict_fatalities: conflictFatalities,
+    ...regimeData,
     sweep_age_minutes: sweepAge,
     last_sweep: lastSweepTime,
   });
@@ -514,6 +539,18 @@ async function runSweepCycle() {
     console.log(`[Crucix] ${currentData.ideas.length} ideas (${synthesized.ideasSource}) | ${currentData.news.length} news | ${currentData.newsFeed.length} feed items`);
     if (delta?.summary) console.log(`[Crucix] Delta: ${delta.summary.totalChanges} changes, ${delta.summary.criticalChanges} critical, direction: ${delta.summary.direction}`);
     console.log(`[Crucix] Next sweep at ${new Date(Date.now() + config.refreshIntervalMinutes * 60000).toLocaleTimeString()}`);
+
+    // 7. Persist sweep to TSDB
+    const regimeData = computeRegime(currentData);
+    if (regimeData) {
+      persistSweep(regimeData, {
+        sourcesOk: currentData.meta.sourcesOk,
+        sourcesQueried: currentData.meta.sourcesQueried,
+        llmIdeas: currentData.ideas.length,
+        newsCount: currentData.news.length,
+        sweepDurationMs: currentData.meta.sweepDurationMs,
+      });
+    }
 
   } catch (err) {
     console.error('[Crucix] Sweep failed:', err.message);
