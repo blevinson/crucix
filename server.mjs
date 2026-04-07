@@ -331,8 +331,8 @@ function computeRegime(data) {
   }
   if (regime === 'normal' && wtiDayChangePct !== null && wtiDayChangePct >= 2.0) {
     regime = 'energy_shock';
-    biasDirection = 'short';
-    regimeReasons.push(`WTI +${wtiDayChangePct.toFixed(1)}% (>+2% = short-only bias)`);
+    thresholdAdjust = 0.65;
+    regimeReasons.push(`WTI +${wtiDayChangePct.toFixed(1)}% (>+2% = raised ML threshold 0.65)`);
   }
   if (regime === 'normal' && vixValue !== null && vixValue >= 25 && vixValue < 30) {
     regime = 'elevated';
