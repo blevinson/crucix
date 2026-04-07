@@ -314,35 +314,59 @@ app.get('/api/regime', (req, res) => {
   const conflictEvents = acled.totalEvents ?? 0;
   const conflictFatalities = acled.totalFatalities ?? 0;
 
-  // --- Regime classification ---
+  // S&P intraday range (for logging, not gating)
+  let sp500RangePct = null;
+  if (sp500?.history?.length > 0) {
+    const today = sp500.history[sp500.history.length - 1];
+    if (today?.high && today?.low && today.low > 0) {
+      sp500RangePct = parseFloat(((today.high - today.low) / today.low * 100).toFixed(2));
+    }
+  }
+
+  // --- Regime classification (data-driven from 61,707 eval backtest) ---
+  // Priority order: chaos > energy_shock > elevated > fear > grind > normal
   let regime = 'normal';
   let regimeReasons = [];
+  let suppress = false;         // true = bots should suppress all entries
+  let thresholdAdjust = 0.55;   // recommended ML threshold
 
-  // Chaos: oil surging + equities dumping + bonds dumping (panic liquidation)
+  // 1. Chaos: oil surging + equities dumping + bonds dumping (panic liquidation)
+  //    Backtest: negative EV at every threshold across 3 sessions
   if (wtiDayChangePct !== null && sp500ChangePct !== null && tltChangePct !== null) {
     if (wtiDayChangePct >= 2.0 && sp500ChangePct <= -1.0 && tltChangePct <= -0.3) {
       regime = 'chaos';
+      suppress = true;
       regimeReasons.push(`oil +${wtiDayChangePct.toFixed(1)}%, S&P ${sp500ChangePct.toFixed(1)}%, bonds ${tltChangePct.toFixed(1)}%`);
     }
   }
 
-  // Fear: VIX elevated
-  if (regime === 'normal' && vixValue !== null) {
-    if (vixValue >= 30) {
-      regime = 'fear';
-      regimeReasons.push(`VIX ${vixValue.toFixed(1)} (>=30)`);
-    } else if (vixValue >= 25) {
-      regime = 'elevated';
-      regimeReasons.push(`VIX ${vixValue.toFixed(1)} (>=25)`);
-    }
+  // 2. Energy shock: WTI up >2% (strongest macro predictor, r=-0.298)
+  //    Backtest: 43.9% WR, -$1,521 across 19 sessions = 66% of all losses
+  if (regime === 'normal' && wtiDayChangePct !== null && wtiDayChangePct >= 2.0) {
+    regime = 'energy_shock';
+    suppress = true;
+    regimeReasons.push(`WTI +${wtiDayChangePct.toFixed(1)}% (>+2% = suppress)`);
   }
 
-  // Grind: low vol, tight spreads
-  if (regime === 'normal' && vixValue !== null) {
-    if (vixValue < 15) {
-      regime = 'grind';
-      regimeReasons.push(`VIX ${vixValue.toFixed(1)} (<15)`);
-    }
+  // 3. Elevated: VIX 25-30 (worst VIX bucket in backtest)
+  //    Backtest: 42.9% WR, PF 0.75, -$573 across 7 sessions
+  if (regime === 'normal' && vixValue !== null && vixValue >= 25 && vixValue < 30) {
+    regime = 'elevated';
+    thresholdAdjust = 0.60;
+    regimeReasons.push(`VIX ${vixValue.toFixed(1)} (25-30 danger zone, threshold → 0.60)`);
+  }
+
+  // 4. Fear: VIX >= 30 (model performs near baseline here, no adjustment needed)
+  //    Backtest: 47.1% WR, similar to flat — model doesn't break in panic
+  if (regime === 'normal' && vixValue !== null && vixValue >= 30) {
+    regime = 'fear';
+    regimeReasons.push(`VIX ${vixValue.toFixed(1)} (>=30)`);
+  }
+
+  // 5. Grind: VIX < 15 (marginal improvement, keep default threshold)
+  if (regime === 'normal' && vixValue !== null && vixValue < 15) {
+    regime = 'grind';
+    regimeReasons.push(`VIX ${vixValue.toFixed(1)} (<15)`);
   }
 
   // VIX regime sub-classification
@@ -361,10 +385,13 @@ app.get('/api/regime', (req, res) => {
   res.json({
     regime,
     regime_reasons: regimeReasons,
+    suppress,
+    threshold: thresholdAdjust,
     vix: vixValue,
     vix_change_pct: vixChange,
     vix_regime: vixRegime,
     sp500_change_pct: sp500ChangePct,
+    sp500_range_pct: sp500RangePct,
     wti: wti,
     wti_day_change_pct: wtiDayChangePct !== null ? parseFloat(wtiDayChangePct.toFixed(2)) : null,
     tlt_change_pct: tltChangePct,
