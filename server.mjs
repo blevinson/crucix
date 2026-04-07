@@ -324,11 +324,14 @@ app.get('/api/regime', (req, res) => {
   }
 
   // --- Regime classification (data-driven from 61,707 eval backtest) ---
+  // Strategy F: global 0.60 + short-only on energy shock
+  // Backtest: 875 trades, 53.3% WR, PF 1.14, +$254 (vs -$2,338 at flat 0.55)
   // Priority order: chaos > energy_shock > elevated > fear > grind > normal
   let regime = 'normal';
   let regimeReasons = [];
   let suppress = false;         // true = bots should suppress all entries
-  let thresholdAdjust = 0.55;   // recommended ML threshold
+  let biasDirection = null;     // null = both, "short" or "long" = directional bias
+  let thresholdAdjust = 0.60;   // global 0.60 — model only profitable above this
 
   // 1. Chaos: oil surging + equities dumping + bonds dumping (panic liquidation)
   //    Backtest: negative EV at every threshold across 3 sessions
@@ -340,30 +343,29 @@ app.get('/api/regime', (req, res) => {
     }
   }
 
-  // 2. Energy shock: WTI up >2% (strongest macro predictor, r=-0.298)
-  //    Backtest: 43.9% WR, -$1,521 across 19 sessions = 66% of all losses
+  // 2. Energy shock: WTI up >2% — short-only bias at 0.60
+  //    Backtest: SHORT at 0.60 = 54.9% WR, PF 1.22, +$35 (vs LONG -$178)
+  //    Longs are fighting macro tide, shorts capture real selling flow
   if (regime === 'normal' && wtiDayChangePct !== null && wtiDayChangePct >= 2.0) {
     regime = 'energy_shock';
-    suppress = true;
-    regimeReasons.push(`WTI +${wtiDayChangePct.toFixed(1)}% (>+2% = suppress)`);
+    biasDirection = 'short';
+    regimeReasons.push(`WTI +${wtiDayChangePct.toFixed(1)}% (>+2% = short-only bias)`);
   }
 
   // 3. Elevated: VIX 25-30 (worst VIX bucket in backtest)
-  //    Backtest: 42.9% WR, PF 0.75, -$573 across 7 sessions
+  //    Backtest: 42.9% WR, PF 0.75 — already handled by global 0.60 threshold
   if (regime === 'normal' && vixValue !== null && vixValue >= 25 && vixValue < 30) {
     regime = 'elevated';
-    thresholdAdjust = 0.60;
-    regimeReasons.push(`VIX ${vixValue.toFixed(1)} (25-30 danger zone, threshold → 0.60)`);
+    regimeReasons.push(`VIX ${vixValue.toFixed(1)} (25-30 danger zone)`);
   }
 
   // 4. Fear: VIX >= 30 (model performs near baseline here, no adjustment needed)
-  //    Backtest: 47.1% WR, similar to flat — model doesn't break in panic
   if (regime === 'normal' && vixValue !== null && vixValue >= 30) {
     regime = 'fear';
     regimeReasons.push(`VIX ${vixValue.toFixed(1)} (>=30)`);
   }
 
-  // 5. Grind: VIX < 15 (marginal improvement, keep default threshold)
+  // 5. Grind: VIX < 15
   if (regime === 'normal' && vixValue !== null && vixValue < 15) {
     regime = 'grind';
     regimeReasons.push(`VIX ${vixValue.toFixed(1)} (<15)`);
@@ -386,6 +388,7 @@ app.get('/api/regime', (req, res) => {
     regime,
     regime_reasons: regimeReasons,
     suppress,
+    bias_direction: biasDirection,
     threshold: thresholdAdjust,
     vix: vixValue,
     vix_change_pct: vixChange,
