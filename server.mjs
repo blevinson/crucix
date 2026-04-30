@@ -40,7 +40,8 @@ const sseClients = new Set();
 const memory = new MemoryManager(RUNS_DIR);
 
 // === LLM + Telegram + Discord ===
-const llmProvider = createLLMProvider(config.llm);
+const llmDisabled = (process.env.LLM_DISABLED || '').toLowerCase() === 'true';
+const llmProvider = llmDisabled ? null : createLLMProvider(config.llm);
 const telegramAlerter = new TelegramAlerter(config.telegram);
 const discordAlerter = new DiscordAlerter(config.discord || {});
 
@@ -319,7 +320,6 @@ function computeRegime(data) {
   let regime = 'normal';
   let regimeReasons = [];
   let suppress = false;
-  let biasDirection = null;
   let thresholdAdjust = 0.60;
 
   if (wtiDayChangePct !== null && sp500ChangePct !== null && tltChangePct !== null) {
@@ -347,6 +347,58 @@ function computeRegime(data) {
     regimeReasons.push(`VIX ${vixValue.toFixed(1)} (<15)`);
   }
 
+  // Bias direction: derived from market internals
+  let biasDirection = null;
+  let biasConfidence = 0.5;
+  {
+    let bullScore = 0;
+    let bearScore = 0;
+
+    // S&P500 momentum
+    if (sp500ChangePct !== null) {
+      if (sp500ChangePct > 0.5) { bullScore += 2; }
+      else if (sp500ChangePct > 0.1) { bullScore += 1; }
+      else if (sp500ChangePct < -0.5) { bearScore += 2; }
+      else if (sp500ChangePct < -0.1) { bearScore += 1; }
+    }
+
+    // VIX level: low VIX = bullish, high VIX = bearish
+    if (vixValue !== null) {
+      if (vixValue < 16) { bullScore += 2; }
+      else if (vixValue < 20) { bullScore += 1; }
+      else if (vixValue > 28) { bearScore += 2; }
+      else if (vixValue > 22) { bearScore += 1; }
+    }
+
+    // VIX change: falling VIX = bullish
+    if (vixChange !== null) {
+      if (vixChange < -3) { bullScore += 1; }
+      else if (vixChange > 3) { bearScore += 1; }
+    }
+
+    // Credit: HYG rising = risk-on = bullish
+    if (hygChangePct !== null) {
+      if (hygChangePct > 0.3) { bullScore += 1; }
+      else if (hygChangePct < -0.3) { bearScore += 1; }
+    }
+
+    // Energy shock is bearish for equities
+    if (regime === 'energy_shock') { bearScore += 1; }
+    if (regime === 'chaos') { bearScore += 3; }
+
+    const total = bullScore + bearScore;
+    if (total > 0) {
+      if (bullScore > bearScore + 1) {
+        biasDirection = 'long';
+        biasConfidence = Math.min(0.5 + (bullScore - bearScore) * 0.1, 0.95);
+      } else if (bearScore > bullScore + 1) {
+        biasDirection = 'short';
+        biasConfidence = Math.min(0.5 + (bearScore - bullScore) * 0.1, 0.95);
+      }
+      // else neutral — biasDirection stays null
+    }
+  }
+
   let vixRegime = 'normal';
   if (vixValue !== null) {
     if (vixValue >= 30) vixRegime = 'panic';
@@ -357,7 +409,7 @@ function computeRegime(data) {
 
   return {
     regime, regime_reasons: regimeReasons, suppress, bias_direction: biasDirection,
-    threshold: thresholdAdjust, vix: vixValue, vix_change_pct: vixChange,
+    bias_confidence: biasConfidence, threshold: thresholdAdjust, vix: vixValue, vix_change_pct: vixChange,
     vix_regime: vixRegime, sp500_change_pct: sp500ChangePct, sp500_range_pct: sp500RangePct,
     wti, wti_day_change_pct: wtiDayChangePct !== null ? parseFloat(wtiDayChangePct.toFixed(2)) : null,
     tlt_change_pct: tltChangePct, hyg_change_pct: hygChangePct,

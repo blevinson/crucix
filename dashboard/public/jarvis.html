@@ -1763,17 +1763,18 @@ document.addEventListener('DOMContentLoaded', () => {
   const hasInlineData = !!(D && D.meta);
   const canProbeApi = location.protocol !== 'file:';
 
-  if (canProbeApi && !hasInlineData) {
-    // Server mode: always fetch live data from API (ignore any stale inline D)
+  if (canProbeApi) {
+    // Server mode: fetch live data from API, fall back to inline data while loading
+    if (hasInlineData) { init(); }
     fetch('/api/data')
       .then(r => r.json())
-      .then(data => { D = data; init(); connectSSE(); })
+      .then(data => { D = data; if (hasInlineData) { reinit(); } else { init(); } connectSSE(); })
       .catch(() => {
-        // Should not reach here — server routes to loading.html when no data
-        if (D && D.meta) { init(); connectSSE(); }
+        if (D && D.meta && !hasInlineData) { init(); }
+        connectSSE();
       });
   } else if (hasInlineData) {
-    // File mode: use inline data
+    // File mode: use inline data only
     init();
   }
 });

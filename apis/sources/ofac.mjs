@@ -42,21 +42,19 @@ function parseSDNMetadata(xml) {
 
 // Fetch SDN list metadata (smaller initial chunk via timeout)
 export async function getSDNMetadata() {
-  // The full SDN XML is large; safeFetch will get the first 500 chars
-  // which should include the header/publish date
-  const data = await safeFetch(SDN_XML_URL, { timeout: 20000 });
+  const data = await safeFetch(SDN_XML_URL, { timeout: 10000, retries: 0 });
   return parseSDNMetadata(data);
 }
 
 // Fetch advanced SDN data (includes more structured info)
 export async function getSDNAdvanced() {
-  const data = await safeFetch(SDN_ADVANCED_URL, { timeout: 20000 });
+  const data = await safeFetch(SDN_ADVANCED_URL, { timeout: 10000, retries: 0 });
   return parseSDNMetadata(data);
 }
 
 // Fetch consolidated list metadata
 export async function getConsolidatedMetadata() {
-  const data = await safeFetch(CONS_ADVANCED_URL, { timeout: 20000 });
+  const data = await safeFetch(CONS_ADVANCED_URL, { timeout: 10000, retries: 0 });
   return parseSDNMetadata(data);
 }
 
@@ -101,15 +99,15 @@ function parseRecentEntries(xml) {
 
 // Briefing — report on sanctions list status and metadata
 export async function briefing() {
-  const [sdnMeta, advancedMeta] = await Promise.all([
+  // Fetch SDN metadata and advanced data in parallel, plus sample entries
+  // (reuse advanced response for entries instead of a third fetch)
+  const [sdnMeta, advancedRaw] = await Promise.all([
     getSDNMetadata(),
-    getSDNAdvanced(),
+    safeFetch(SDN_ADVANCED_URL, { timeout: 12000, retries: 0 }),
   ]);
 
-  // Try to extract any entries visible in the advanced data
-  const sampleEntries = parseRecentEntries(
-    await safeFetch(SDN_ADVANCED_URL, { timeout: 25000 })
-  );
+  const advancedMeta = parseSDNMetadata(advancedRaw);
+  const sampleEntries = parseRecentEntries(advancedRaw);
 
   return {
     source: 'OFAC Sanctions',

@@ -28,7 +28,7 @@ export async function searchEvents(query = '', opts = {}) {
     sort: sortBy,
   });
 
-  return safeFetch(`${BASE}/doc/doc?${params}`);
+  return safeFetch(`${BASE}/doc/doc?${params}`, { timeout: 12000, retries: 0 });
 }
 
 // Get tone/sentiment timeline for a topic
@@ -71,7 +71,7 @@ export async function geoEvents(query = '', opts = {}) {
     maxpoints: String(maxPoints),
   });
 
-  return safeFetch(`${BASE}/geo/geo?${params}`);
+  return safeFetch(`${BASE}/geo/geo?${params}`, { timeout: 8000, retries: 0 });
 }
 
 // Compact article for briefing
@@ -90,8 +90,11 @@ function compactArticle(a) {
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // Briefing mode — get top global events summary (sequential due to rate limit)
+// Budget: must complete within 25s to avoid the 30s source timeout
 export async function briefing() {
-  // Single broad query to stay within rate limits
+  const sweepStart = Date.now();
+
+  // Single broad query — use shorter timeout/no retry to stay within budget
   const all = await searchEvents(
     'conflict OR military OR economy OR crisis OR war OR sanctions OR tariff OR strike OR outbreak',
     { maxRecords: 50, timespan: '24h' }
@@ -99,24 +102,26 @@ export async function briefing() {
 
   const articles = (all?.articles || []).map(compactArticle);
 
-  // Categorize by keyword matching in titles
   const categorize = (keywords) => articles.filter(a =>
     keywords.some(k => a.title?.toLowerCase().includes(k))
   );
 
-  // Geo events — get mapped event locations (separate API, respects rate limit)
-  await delay(5500);
+  // Geo events — only attempt if we have time budget remaining (need 5.5s delay + fetch)
   let geoPoints = [];
-  try {
-    const geo = await geoEvents('conflict OR military OR protest OR crisis', { maxPoints: 30, timespan: '24h' });
-    geoPoints = (geo?.features || []).filter(f => f.geometry?.coordinates).map(f => ({
-      lat: f.geometry.coordinates[1],
-      lon: f.geometry.coordinates[0],
-      name: f.properties?.name || f.properties?.html || '',
-      count: f.properties?.count || 1,
-      type: f.properties?.type || 'event',
-    }));
-  } catch (e) { /* geo endpoint optional — don't break briefing */ }
+  const elapsed = Date.now() - sweepStart;
+  if (elapsed < 15000) {
+    try {
+      await delay(5500);
+      const geo = await geoEvents('conflict OR military OR protest OR crisis', { maxPoints: 30, timespan: '24h' });
+      geoPoints = (geo?.features || []).filter(f => f.geometry?.coordinates).map(f => ({
+        lat: f.geometry.coordinates[1],
+        lon: f.geometry.coordinates[0],
+        name: f.properties?.name || f.properties?.html || '',
+        count: f.properties?.count || 1,
+        type: f.properties?.type || 'event',
+      }));
+    } catch (e) { /* geo endpoint optional */ }
+  }
 
   return {
     source: 'GDELT',
