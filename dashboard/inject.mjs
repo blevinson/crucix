@@ -12,6 +12,7 @@ import { exec } from 'child_process';
 import config from '../crucix.config.mjs';
 import { createLLMProvider } from '../lib/llm/index.mjs';
 import { generateLLMIdeas } from '../lib/llm/ideas.mjs';
+import { rankSectors } from '../lib/synthesis/sector_rank.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -563,6 +564,14 @@ export async function synthesize(data) {
       symbol: q.symbol, name: q.name, price: q.price,
       change: q.change, changePct: q.changePct
     })),
+    sectors: (yfData.sectors || []).map(q => ({
+      symbol: q.symbol, name: q.name, price: q.price,
+      change: q.change, changePct: q.changePct, history: q.history || []
+    })),
+    equities: (yfData.equities || []).map(q => ({
+      symbol: q.symbol, name: q.name, price: q.price,
+      change: q.change, changePct: q.changePct
+    })),
     vix: yfQuotes['^VIX'] ? {
       value: yfQuotes['^VIX'].price,
       change: yfQuotes['^VIX'].change,
@@ -610,6 +619,7 @@ export async function synthesize(data) {
     tg: { posts: tgData.totalPosts || 0, urgent: tgUrgent, topPosts: tgTop },
     who, fred, energy, metals, bls, treasury, gscpi, defense, noaa, epa, acled, gdelt, space, health, news,
     markets, // Live Yahoo Finance market data
+    sectorRotation: rankSectors(markets, { topN: 3 }),
     ideas: [], ideasSource: 'disabled',
     // newsFeed for ticker (merged RSS + GDELT + Telegram)
     newsFeed: buildNewsFeed(news, gdeltData, tgUrgent, tgTop),
