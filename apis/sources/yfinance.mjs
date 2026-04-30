@@ -6,7 +6,9 @@ import { safeFetch } from '../utils/fetch.mjs';
 
 const BASE = 'https://query1.finance.yahoo.com/v8/finance/chart';
 
-// Symbols to track — covers broad market, rates, commodities, crypto, volatility
+// Symbols to track — covers broad market, rates, commodities, crypto, volatility,
+// SPDR sector ETFs (full GICS coverage), and a small large-cap universe used by
+// the sector-rotation / trade-ideas pipeline.
 const SYMBOLS = {
   // Indexes / ETFs
   '^GSPC': 'S&P 500',
@@ -28,6 +30,51 @@ const SYMBOLS = {
   'ETH-USD': 'Ethereum',
   // Volatility
   '^VIX': 'VIX',
+  // SPDR sector ETFs — full 11-sector GICS coverage. Order matches GICS order.
+  XLE: 'Energy',
+  XLB: 'Materials',
+  XLI: 'Industrials',
+  XLY: 'Consumer Discretionary',
+  XLP: 'Consumer Staples',
+  XLV: 'Health Care',
+  XLF: 'Financials',
+  XLK: 'Technology',
+  XLC: 'Communication Services',
+  XLU: 'Utilities',
+  XLRE: 'Real Estate',
+  // Mega-cap leaders — cheap proxies for sector flow when the ETFs lag.
+  // Kept short on purpose (free Yahoo endpoint, every symbol costs a request).
+  AAPL: 'Apple',
+  MSFT: 'Microsoft',
+  NVDA: 'Nvidia',
+  GOOGL: 'Alphabet',
+  AMZN: 'Amazon',
+  META: 'Meta',
+  TSLA: 'Tesla',
+  XOM: 'ExxonMobil',
+  CVX: 'Chevron',
+  JPM: 'JPMorgan',
+  UNH: 'UnitedHealth',
+  V: 'Visa',
+  WMT: 'Walmart',
+};
+
+// Sector ETF symbols, in GICS order. Used by the sector-rank synthesis module.
+export const SECTOR_ETFS = [
+  'XLE', 'XLB', 'XLI', 'XLY', 'XLP', 'XLV', 'XLF', 'XLK', 'XLC', 'XLU', 'XLRE',
+];
+
+// GICS sector membership for the equities tracked here. Hand-maintained — keep
+// in sync if SYMBOLS gains tickers. Used to attribute single-name moves to
+// their sector when surfacing flow context.
+export const SECTOR_BY_SYMBOL = {
+  AAPL: 'XLK', MSFT: 'XLK', NVDA: 'XLK',
+  GOOGL: 'XLC', META: 'XLC',
+  AMZN: 'XLY', TSLA: 'XLY',
+  XOM: 'XLE', CVX: 'XLE',
+  JPM: 'XLF', V: 'XLF',
+  UNH: 'XLV',
+  WMT: 'XLP',
 };
 
 async function fetchQuote(symbol) {
@@ -122,6 +169,11 @@ export async function collect() {
     commodities: pickGroup(quotes, ['GC=F', 'SI=F', 'CL=F', 'BZ=F', 'NG=F']),
     crypto: pickGroup(quotes, ['BTC-USD', 'ETH-USD']),
     volatility: pickGroup(quotes, ['^VIX']),
+    sectors: pickGroup(quotes, SECTOR_ETFS),
+    equities: pickGroup(
+      quotes,
+      ['AAPL','MSFT','NVDA','GOOGL','AMZN','META','TSLA','XOM','CVX','JPM','UNH','V','WMT']
+    ),
   };
 }
 
