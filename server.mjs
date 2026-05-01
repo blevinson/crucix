@@ -15,6 +15,7 @@ import { synthesize, generateIdeas } from './dashboard/inject.mjs';
 import { MemoryManager } from './lib/delta/index.mjs';
 import { createLLMProvider } from './lib/llm/index.mjs';
 import { generateLLMIdeas } from './lib/llm/ideas.mjs';
+import { emitIdeas, isGraphitiEmitEnabled } from './lib/graphiti_emit.mjs';
 import { TelegramAlerter } from './lib/alerts/telegram.mjs';
 import { DiscordAlerter } from './lib/alerts/discord.mjs';
 
@@ -551,6 +552,11 @@ async function runSweepCycle() {
           synthesized.ideas = llmIdeas;
           synthesized.ideasSource = 'llm';
           console.log(`[Crucix] LLM generated ${llmIdeas.length} ideas`);
+          if (isGraphitiEmitEnabled()) {
+            emitIdeas(llmIdeas, { sweepTime: synthesized.timestamp })
+              .then((r) => r?.ok && console.log(`[Crucix] Graphiti bridge ingested ${r.count} ideas`))
+              .catch((e) => console.error('[Crucix] Graphiti emit error:', e.message));
+          }
         } else {
           synthesized.ideas = [];
           synthesized.ideasSource = 'llm-failed';
