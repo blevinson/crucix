@@ -95,9 +95,17 @@ async function fetchQuote(symbol) {
     const closes = quotes.close || [];
     const timestamps = result.timestamp || [];
 
-    // Get current price and previous close
+    // Get current price and true 1-day previous close.
+    // meta.chartPreviousClose is the close *before* the range window (not yesterday)
+    // so we compute prevClose from the closes array directly.
     const price = meta.regularMarketPrice ?? closes[closes.length - 1];
-    const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? closes[closes.length - 2];
+    const nonNullCloses = closes.filter(c => c != null);
+    // When market is open, today's bar close is null — last nonNull is yesterday.
+    // When market is closed, last nonNull is today — second-to-last is yesterday.
+    const isMarketOpen = meta.marketState === 'REGULAR';
+    const prevClose = isMarketOpen
+      ? (nonNullCloses[nonNullCloses.length - 1] ?? meta.previousClose)
+      : (nonNullCloses[nonNullCloses.length - 2] ?? meta.previousClose ?? meta.chartPreviousClose);
     const change = price && prevClose ? price - prevClose : 0;
     const changePct = prevClose ? (change / prevClose) * 100 : 0;
 
