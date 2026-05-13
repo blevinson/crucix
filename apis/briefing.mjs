@@ -42,6 +42,10 @@ import { briefing as space } from './sources/space.mjs';
 
 // === Tier 5: Live Market Data ===
 import { briefing as yfinance } from './sources/yfinance.mjs';
+import { briefing as alpacaMovers } from './sources/alpaca-movers.mjs';
+import { briefing as alpacaPortfolio } from './sources/alpaca-portfolio.mjs';
+import { briefing as benzingaNews } from './sources/benzinga-news.mjs';
+import { briefing as openbbCot } from './sources/openbb-cot.mjs';
 
 // === Tier 6: Cyber & Infrastructure ===
 import { briefing as cisaKev } from './sources/cisa-kev.mjs';
@@ -107,6 +111,10 @@ export async function fullBriefing() {
 
     // Tier 5: Live Market Data
     runSource('YFinance', yfinance),
+    runSource('AlpacaMovers', alpacaMovers),
+    runSource('AlpacaPortfolio', alpacaPortfolio),
+    runSource('BenzingaNews', benzingaNews),
+    runSource('CFTC_COT', openbbCot),
 
     // Tier 6: Cyber & Infrastructure
     runSource('CISA-KEV', cisaKev),
