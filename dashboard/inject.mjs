@@ -432,6 +432,38 @@ export async function synthesize(data) {
   const tgTop = (tgData.topPosts || []).filter(p => isEnglish(p.text)).map(p => ({
     channel: p.channel, text: p.text?.substring(0, 200), views: p.views, date: p.date, urgentFlags: []
   }));
+  // Retail sentiment sources
+  const stocktwitsData = data.sources.Stocktwits || {};
+  const stocktwits = {
+    timestamp: stocktwitsData.timestamp || null,
+    tickersQueried: stocktwitsData.tickersQueried || 0,
+    topByVolume: stocktwitsData.topByVolume || [],
+    tickers: stocktwitsData.tickers || {},
+  };
+  const apeWisdomData = data.sources.ApeWisdom || {};
+  const apewisdom = {
+    timestamp: apeWisdomData.timestamp || null,
+    noiseFloor: apeWisdomData.noiseFloor || 5,
+    tickers: apeWisdomData.tickers || [],
+    topMovers: apeWisdomData.topMovers || [],
+  };
+  const redditRaw = data.sources.Reddit || {};
+  const redditEnriched = {
+    timestamp: redditRaw.timestamp || null,
+    subreddits: Object.fromEntries(
+      Object.entries(redditRaw.subreddits || {}).map(([sub, posts]) => [
+        sub,
+        (posts || []).slice(0, 5).map(p => ({
+          title: p.title,
+          score: p.score ?? 0,
+          comments: p.comments ?? 0,
+          sentiment: p.sentiment || null,
+          topComments: (p.topComments || []).slice(0, 3),
+        })),
+      ])
+    ),
+    topTickers: redditRaw.topTickers || [],
+  };
   const who = (data.sources.WHO?.diseaseOutbreakNews || []).slice(0, 10).map(w => ({
     title: w.title?.substring(0, 120), date: w.date, summary: w.summary?.substring(0, 150)
   }));
@@ -609,6 +641,7 @@ export async function synthesize(data) {
     sdr: { total: sdrNet.totalReceivers || 0, online: sdrNet.online || 0, zones: sdrZones },
     tg: { posts: tgData.totalPosts || 0, urgent: tgUrgent, topPosts: tgTop },
     who, fred, energy, metals, bls, treasury, gscpi, defense, noaa, epa, acled, gdelt, space, health, news,
+    stocktwits, apewisdom, redditEnriched, // Retail trader sentiment sources (FIN-1981)
     markets, // Live Yahoo Finance market data
     ideas: [], ideasSource: 'disabled',
     // newsFeed for ticker (merged RSS + GDELT + Telegram)
