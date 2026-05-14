@@ -34,6 +34,8 @@ import { briefing as epa } from './sources/epa.mjs';
 import { briefing as patents } from './sources/patents.mjs';
 import { briefing as bluesky } from './sources/bluesky.mjs';
 import { briefing as reddit } from './sources/reddit.mjs';
+import { briefing as stocktwits } from './sources/stocktwits.mjs';
+import { briefing as apewisdom } from './sources/apewisdom.mjs';
 import { briefing as telegram } from './sources/telegram.mjs';
 import { briefing as kiwisdr } from './sources/kiwisdr.mjs';
 
@@ -67,7 +69,7 @@ export async function runSource(name, fn, ...args) {
 }
 
 export async function fullBriefing() {
-  console.error('[Crucix] Starting intelligence sweep — 29 sources...');
+  console.error('[Crucix] Starting intelligence sweep — 31 sources...');
   const start = Date.now();
 
   const allPromises = [
@@ -99,6 +101,8 @@ export async function fullBriefing() {
     runSource('Patents', patents),
     runSource('Bluesky', bluesky),
     runSource('Reddit', reddit),
+    runSource('Stocktwits', stocktwits),
+    runSource('ApeWisdom', apewisdom),
     runSource('Telegram', telegram),
     runSource('KiwiSDR', kiwisdr),
 
