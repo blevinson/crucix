@@ -54,14 +54,26 @@ function buildFilters() {
   if (MAX_MCAP_USD > 0)  { conds.push('tm.market_cap <= $MAX_MCAP');  params.MAX_MCAP = MAX_MCAP_USD; }
   if (MIN_PRICE_USD > 0) { conds.push('m.price >= $MIN_PRICE');       params.MIN_PRICE = MIN_PRICE_USD; }
   if (MAX_PRICE_USD > 0) { conds.push('m.price <= $MAX_PRICE');       params.MAX_PRICE = MAX_PRICE_USD; }
-  if (MIN_DAILY_DOLLAR_VOL > 0) {
-    // Approximate daily $ volume from the snapshot's price * volume. crucix_movers
-    // doesn't ship a precomputed dvol; multiply at the row level. NULL-tolerant
-    // because the upstream ingest only populates volume for most_active rows
-    // — directional (gainers/losers) rows have NULL volume by design.
-    conds.push('(m.volume IS NULL OR (m.price * m.volume) >= $MIN_DVOL)');
-    params.MIN_DVOL = MIN_DAILY_DOLLAR_VOL;
-  }
+  // P6: the old daily-$-volume floor was a no-op (worse: a silent category-wipe).
+  // crucix_movers NEVER co-populates price AND volume on the same row — verified
+  // live: directional (gainers/losers) rows carry price-only (volume NULL by
+  // design), most_active rows carry volume-only (price NULL). So `m.price *
+  // m.volume` is structurally uncomputable from this table:
+  //   - on directional, `m.volume IS NULL OR ...` short-circuited TRUE -> the
+  //     $20M floor filtered NOTHING (the bug: penny warrants sailed through, only
+  //     the separate MIN_PRICE>=$5 caught them);
+  //   - on most_active, price IS NULL -> `price*volume >= MIN` evaluated to NULL
+  //     (not true) -> the floor SILENTLY WIPED the entire most_active category.
+  // ticker_metadata has no avg/dollar-volume column either, so an honest per-row
+  // dvol filter is not achievable here without an ingest change (out of P6 scope,
+  // bridge image down). We DROP the false floor rather than keep a no-op that
+  // advertises a liquidity gate it does not enforce. The remaining honest per-row
+  // gates are MIN_PRICE (>= $5) and MIN_MCAP (>= $0.3B), both still applied above.
+  // The dvol floor now lives ONLY as a soft instruction to the LLM
+  // (lib/llm/ideas.mjs "REQUIRE daily dollar volume >= $20M"), which is honest
+  // since the data cannot enforce it deterministically. Proper fix: patch the
+  // alpaca-movers ingest to populate volume on directional + price on most_active
+  // so dvol becomes computable, then restore a real floor.
   return { conds, params };
 }
 
@@ -161,6 +173,7 @@ function rollupByIndustry(rows) {
 }
 
 function shapeRow(r) {
+  const volume = r.volume != null ? Number(r.volume) : null;
   return {
     symbol: r.symbol,
     name: r.name,
@@ -169,8 +182,13 @@ function shapeRow(r) {
     mcap_b: r.mcap_b != null ? Math.round(r.mcap_b * 100) / 100 : null,
     sector: r.sector,
     industry: r.industry,
-    volume: r.volume != null ? Number(r.volume) : null,
+    volume,
     trade_count: r.trade_count != null ? Number(r.trade_count) : null,
+    // P6: honest liquidity flag. crucix_movers ships volume only for most_active
+    // rows; directional (gainers/losers) rows have NULL volume by design, so no
+    // daily-$-volume floor was enforced on them. Surface that explicitly rather
+    // than silently passing them off as liquidity-screened.
+    dvol_verified: false,
   };
 }
 
@@ -205,13 +223,18 @@ export async function collect() {
   // so it's noisy for sector rotation; we deliberately exclude it here.
   const industryHeat = rollupByIndustry(directional.map(shapeRow));
 
+  // P6: the dvol floor is intentionally NOT advertised here — it is uncomputable
+  // from crucix_movers (price/volume never co-present) and was a no-op, so
+  // claiming it would be dishonest. The enforced per-row gates are mcap + price
+  // (+ |change| cap on directional). Liquidity is now a soft LLM-prompt
+  // instruction only; directional rows are flagged dvol_verified:false.
   const filterDesc = [
     `mcap≥$${(MIN_MCAP_USD / 1e9).toFixed(2)}B`,
     MAX_MCAP_USD > 0 ? `mcap≤$${(MAX_MCAP_USD / 1e9).toFixed(1)}B` : null,
     MIN_PRICE_USD > 0 ? `price≥$${MIN_PRICE_USD}` : null,
     MAX_PRICE_USD > 0 ? `price≤$${MAX_PRICE_USD}` : null,
-    MIN_DAILY_DOLLAR_VOL > 0 ? `dvol≥$${(MIN_DAILY_DOLLAR_VOL / 1e6).toFixed(0)}M` : null,
     `|change|≤${MAX_ABS_CHANGE_PCT}%`,
+    'dvol-floor=not-enforced (volume not co-present in source; gainers/losers volume-unverified)',
   ].filter(Boolean).join(', ');
 
   const summary =
@@ -227,7 +250,12 @@ export async function collect() {
       max_mcap_usd: MAX_MCAP_USD,
       min_price_usd: MIN_PRICE_USD,
       max_price_usd: MAX_PRICE_USD,
-      min_daily_dollar_vol: MIN_DAILY_DOLLAR_VOL,
+      // P6: configured floor is echoed for transparency, but enforced=false —
+      // crucix_movers can't compute price*volume (the two are never co-present),
+      // so this floor is NOT applied as a hard filter. Don't let downstream think
+      // a $-volume screen ran; it didn't. Liquidity is a soft LLM-prompt rule.
+      daily_dollar_vol_floor_configured: MIN_DAILY_DOLLAR_VOL,
+      daily_dollar_vol_floor_enforced: false,
       max_abs_change_pct: MAX_ABS_CHANGE_PCT,
       per_category_limit: PER_CATEGORY_LIMIT,
     },

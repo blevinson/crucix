@@ -16,6 +16,7 @@ import { rankSectors } from '../lib/synthesis/sector_rank.mjs';
 import { rankIndustries } from '../lib/synthesis/industry_rank.mjs';
 import { collect as collectTechnicals } from '../apis/sources/equity-technicals.mjs';
 import { collect as collectValuation } from '../apis/sources/equity-valuation.mjs';
+import { collect as collectEarnings } from '../apis/sources/earnings.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -702,6 +703,33 @@ export async function synthesize(data) {
     console.error('[inject] valuation enrichment failed:', e.message);
   }
 
+  // === Earnings calendar (P6) ===
+  // Deterministic near-term (7d) earnings dates for the SAME candidate shortlist
+  // valuation/technicals use. Replaces the agentic openbb earnings tool call: a
+  // single Finnhub HTTP fetch, filtered to candidates, feeds the EARNINGS_NEXT_7D
+  // block so the LLM applies the earnings-risk gate (downgrade horizon=Days names
+  // reporting in-window to WATCH; add "RISK: earnings <date>" for horizon=Weeks)
+  // from context instead of a tool. Best-effort + strictly additive: any failure
+  // leaves earnings null, the block is omitted, and the gate is skipped that
+  // sweep (the sweep proceeds unchanged).
+  let earnings = null;
+  try {
+    const mv = data.sources.AlpacaMovers;
+    const earnCandidates = new Set();
+    const addEarn = (s) => { if (s && typeof s === 'string') earnCandidates.add(s.toUpperCase()); };
+    for (const m of (mv?.gainers || [])) addEarn(m.symbol);
+    for (const m of (mv?.losers || [])) addEarn(m.symbol);
+    for (const m of (mv?.mostActive || [])) addEarn(m.symbol);
+    for (const e of (sectorRotation?.leadersByName || [])) addEarn(e.symbol);
+    for (const e of (sectorRotation?.laggardsByName || [])) addEarn(e.symbol);
+
+    if (earnCandidates.size) {
+      earnings = await collectEarnings({ candidates: [...earnCandidates] });
+    }
+  } catch (e) {
+    console.error('[inject] earnings enrichment failed:', e.message);
+  }
+
   const V2 = {
     meta: data.crucix, air, thermal, tSignals, chokepoints, nuke, nukeSignals,
     airMeta: {
@@ -733,6 +761,12 @@ export async function synthesize(data) {
     // valuation claims against it. null when the source degraded (no fetch /
     // crumb fail) — strictly additive.
     valuation,
+    // Near-term earnings calendar (P6): { withinWindow:[{symbol,earnings_date,
+    // days_until,hour}], window:'7d' } for the candidate shortlist, from a single
+    // deterministic Finnhub fetch. compactSweepForLLM emits EARNINGS_NEXT_7D so
+    // the LLM applies the earnings-risk gate (Days->WATCH, Weeks->add risk) from
+    // context. null when the fetch degraded — strictly additive, gate skipped.
+    earnings,
     // AlpacaMovers + BenzingaNews — broader equity universe + per-ticker
     // catalyst attribution. Injected raw; compactSweepForLLM formats them.
     marketMovers: data.sources.AlpacaMovers || null,
