@@ -44,6 +44,7 @@ import { briefing as space } from './sources/space.mjs';
 import { briefing as yfinance } from './sources/yfinance.mjs';
 import { briefing as alpacaMovers } from './sources/alpaca-movers.mjs';
 import { briefing as equityTechnicals } from './sources/equity-technicals.mjs';
+import { briefing as equityValuation } from './sources/equity-valuation.mjs';
 import { briefing as alpacaPortfolio } from './sources/alpaca-portfolio.mjs';
 import { briefing as benzingaNews } from './sources/benzinga-news.mjs';
 import { briefing as openbbCot } from './sources/openbb-cot.mjs';
@@ -118,6 +119,14 @@ export async function fullBriefing() {
     // parallel sweep finishes, so inject.mjs synthesize() enriches the candidate
     // set with those names after the sweep completes.
     runSource('EquityTechnicals', equityTechnicals),
+    // EquityValuation also runs in two phases like EquityTechnicals: nothing
+    // useful at sweep time (the candidate set isn't known and there's no sector
+    // attribution for the static base universe), so the real fetch happens
+    // post-sweep in inject.mjs synthesize() where movers/leaders/laggards +
+    // their sectors are available. Running it here with no candidates is a cheap
+    // no-op (returns the empty 'no candidates supplied' shape) and keeps the
+    // source registered/health-visible.
+    runSource('EquityValuation', equityValuation),
     runSource('AlpacaPortfolio', alpacaPortfolio),
     runSource('BenzingaNews', benzingaNews),
     runSource('CFTC_COT', openbbCot),

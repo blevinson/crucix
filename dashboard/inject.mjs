@@ -13,7 +13,9 @@ import config from '../crucix.config.mjs';
 import { createLLMProvider } from '../lib/llm/index.mjs';
 import { generateLLMIdeas } from '../lib/llm/ideas.mjs';
 import { rankSectors } from '../lib/synthesis/sector_rank.mjs';
+import { rankIndustries } from '../lib/synthesis/industry_rank.mjs';
 import { collect as collectTechnicals } from '../apis/sources/equity-technicals.mjs';
+import { collect as collectValuation } from '../apis/sources/equity-valuation.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -612,6 +614,31 @@ export async function synthesize(data) {
   // movers + sector leaders/laggards (which weren't known mid-sweep) and merge
   // any newly-computed breakouts/breakdowns/flow into the base result.
   const sectorRotation = rankSectors(markets, { topN: 3 });
+
+  // === Industry HOT/COLD ranker (P5) ===
+  // Deterministic ranked industry shortlist that STEERS the LLM (HOT->long
+  // candidates, COLD->short candidates) and FEEDS the P2 grounding scorer as a
+  // confirmable signal. Built from the already-assembled movers + sectorRotation
+  // (+ COT where the parent sector maps to a tracked future). HONEST SCOPE: for
+  // most GICS industries this is just two short-horizon momentum signals
+  // (industry mover-mean + parent-sector composite) — a steer/confirm, NOT a
+  // proven standalone selector. Strictly additive + best-effort: any throw leaves
+  // industryRank null and the sweep proceeds at pre-P5 behavior. The legacy
+  // marketMovers.industryHeat field is left untouched for backward compat.
+  let industryRank = null;
+  try {
+    industryRank = rankIndustries(
+      {
+        marketMovers: data.sources.AlpacaMovers,
+        sectorRotation,
+        cot: data.sources.CFTC_COT,
+      },
+      { topN: 5 },
+    );
+  } catch (e) {
+    console.error('[inject] industry rank failed:', e.message);
+  }
+
   const baseTechnicals = data.sources.EquityTechnicals || null;
   let technicals = baseTechnicals;
   try {
@@ -642,6 +669,39 @@ export async function synthesize(data) {
     console.error('[inject] technicals enrichment failed:', e.message);
   }
 
+  // === Equity valuation (P3) ===
+  // Sector-relative cheap/rich tags for the SAME shortlist technicals uses
+  // (movers + sector leaders/laggards). Sector for the peer groups rides on the
+  // movers rows (AlpacaMovers ships .sector per gainer/loser/most-active);
+  // leaders/laggards carry .sector from sectorRotation. We hand the source the
+  // candidate OBJECTS (not bare symbols) so it groups by sector without any
+  // ticker_metadata re-query. Best-effort: any failure (incl. the Yahoo crumb
+  // handshake) leaves valuation null and the sweep proceeds unchanged.
+  let valuation = null;
+  try {
+    const mv = data.sources.AlpacaMovers;
+    const valCandidates = [];
+    const seenVal = new Set();
+    const addVal = (sym, sector) => {
+      if (!sym || typeof sym !== 'string') return;
+      const up = sym.toUpperCase();
+      if (seenVal.has(up)) return;
+      seenVal.add(up);
+      valCandidates.push({ symbol: up, sector: sector || null });
+    };
+    for (const m of (mv?.gainers || [])) addVal(m.symbol, m.sector);
+    for (const m of (mv?.losers || [])) addVal(m.symbol, m.sector);
+    for (const m of (mv?.mostActive || [])) addVal(m.symbol, m.sector);
+    for (const e of (sectorRotation?.leadersByName || [])) addVal(e.symbol, e.sector);
+    for (const e of (sectorRotation?.laggardsByName || [])) addVal(e.symbol, e.sector);
+
+    if (valCandidates.length) {
+      valuation = await collectValuation({ candidates: valCandidates });
+    }
+  } catch (e) {
+    console.error('[inject] valuation enrichment failed:', e.message);
+  }
+
   const V2 = {
     meta: data.crucix, air, thermal, tSignals, chokepoints, nuke, nukeSignals,
     airMeta: {
@@ -657,9 +717,22 @@ export async function synthesize(data) {
     who, fred, energy, metals, bls, treasury, gscpi, defense, noaa, epa, acled, gdelt, space, health, news,
     markets, // Live Yahoo Finance market data
     sectorRotation,
+    // Industry HOT/COLD ranker (P5). Ranked industry shortlist (mover-mean z +
+    // parent-sector composite z, COT where mapped) split into hot[] (long
+    // candidates) / cold[] (short candidates). compactSweepForLLM emits the
+    // INDUSTRY_HOT / INDUSTRY_COLD blocks; idea_score confirms an industry
+    // hot/cold claim against it (folded into the 'rotation' domain so it doesn't
+    // double-count sector rotation). null when degraded/no-input — strictly additive.
+    industryRank,
     // Bar-derived technicals (MA50/MA200, RSI14, RVOL, 52w hi/lo, breakouts/
     // breakdowns + light OBV/$-vol flow). compactSweepForLLM formats them.
     technicals,
+    // Sector-relative valuation (P3): cheap/rich/fair/unknown tags on the same
+    // candidate shortlist, from Yahoo trailing multiples. compactSweepForLLM
+    // formats the CHEAP_VS_PEERS / RICH_VS_PEERS blocks; idea_score confirms
+    // valuation claims against it. null when the source degraded (no fetch /
+    // crumb fail) — strictly additive.
+    valuation,
     // AlpacaMovers + BenzingaNews — broader equity universe + per-ticker
     // catalyst attribution. Injected raw; compactSweepForLLM formats them.
     marketMovers: data.sources.AlpacaMovers || null,
