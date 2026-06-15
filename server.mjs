@@ -15,6 +15,7 @@ import { synthesize, generateIdeas } from './dashboard/inject.mjs';
 import { MemoryManager } from './lib/delta/index.mjs';
 import { createLLMProvider } from './lib/llm/index.mjs';
 import { generateLLMIdeas } from './lib/llm/ideas.mjs';
+import { scoreIdeas } from './lib/synthesis/idea_score.mjs';
 import { emitIdeas, isGraphitiEmitEnabled } from './lib/graphiti_emit.mjs';
 import { TelegramAlerter } from './lib/alerts/telegram.mjs';
 import { DiscordAlerter } from './lib/alerts/discord.mjs';
@@ -549,11 +550,24 @@ async function runSweepCycle() {
         const previousIdeas = memory.getLastRun()?.ideas || [];
         const llmIdeas = await generateLLMIdeas(llmProvider, synthesized, delta, previousIdeas);
         if (llmIdeas) {
-          synthesized.ideas = llmIdeas;
+          // P2: deterministic post-LLM grounding scorer. Cross-checks each idea's
+          // free-text signals against the real sweep, overrides the LLM's
+          // self-reported confidence with a confluence-derived value, attaches an
+          // evidence_score + grounding tier, re-sorts by grounding, and surfaces a
+          // short-balance flag when shortable evidence exists. Pure/defensive —
+          // on any internal error it returns the raw llmIdeas, so a scorer bug
+          // cannot crash the sweep.
+          const scoredIdeas = scoreIdeas(llmIdeas, synthesized);
+          synthesized.ideas = scoredIdeas;
           synthesized.ideasSource = 'llm';
-          console.log(`[Crucix] LLM generated ${llmIdeas.length} ideas`);
+          console.log(`[Crucix] LLM generated ${scoredIdeas.length} ideas (scored: ` +
+            `${scoredIdeas.filter((i) => i.evidence_tier === 'GROUNDED').length} grounded, ` +
+            `${scoredIdeas.filter((i) => i.evidence_tier === 'PARTIAL').length} partial, ` +
+            `${scoredIdeas.filter((i) => i.evidence_tier === 'NARRATIVE').length} narrative)`);
           if (isGraphitiEmitEnabled()) {
-            emitIdeas(llmIdeas, { sweepTime: synthesized.timestamp })
+            // Emit the SCORED array so the graph archives evidence_score + grounding
+            // tier + overridden confidence (graphiti_emit spreads all idea fields).
+            emitIdeas(scoredIdeas, { sweepTime: synthesized.timestamp })
               .then((r) => r?.ok && console.log(`[Crucix] Graphiti bridge ingested ${r.count} ideas`))
               .catch((e) => console.error('[Crucix] Graphiti emit error:', e.message));
           }
