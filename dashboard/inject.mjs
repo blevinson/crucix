@@ -13,6 +13,7 @@ import config from '../crucix.config.mjs';
 import { createLLMProvider } from '../lib/llm/index.mjs';
 import { generateLLMIdeas } from '../lib/llm/ideas.mjs';
 import { rankSectors } from '../lib/synthesis/sector_rank.mjs';
+import { collect as collectTechnicals } from '../apis/sources/equity-technicals.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -605,6 +606,42 @@ export async function synthesize(data) {
   // Fetch RSS
   const news = await fetchAllNews();
 
+  // === Equity technicals ===
+  // briefing.mjs already ran EquityTechnicals over the static base universe
+  // (sector ETFs + mega-caps). Here we enrich the candidate set with the day's
+  // movers + sector leaders/laggards (which weren't known mid-sweep) and merge
+  // any newly-computed breakouts/breakdowns/flow into the base result.
+  const sectorRotation = rankSectors(markets, { topN: 3 });
+  const baseTechnicals = data.sources.EquityTechnicals || null;
+  let technicals = baseTechnicals;
+  try {
+    const mv = data.sources.AlpacaMovers;
+    const candidateSet = new Set();
+    const addSym = (s) => { if (s && typeof s === 'string') candidateSet.add(s.toUpperCase()); };
+    for (const m of (mv?.gainers || [])) addSym(m.symbol);
+    for (const m of (mv?.losers || [])) addSym(m.symbol);
+    for (const m of (mv?.mostActive || [])) addSym(m.symbol);
+    for (const e of (sectorRotation?.leadersByName || [])) addSym(e.symbol);
+    for (const e of (sectorRotation?.laggardsByName || [])) addSym(e.symbol);
+
+    // Drop anything the base run already covered, so we only 1y-fetch the new
+    // mover/leader/laggard names.
+    const coveredBase = new Set([
+      ...(baseTechnicals?.breakouts || []).map(t => t.symbol),
+      ...(baseTechnicals?.breakdowns || []).map(t => t.symbol),
+      ...(baseTechnicals?.flow || []).map(t => t.symbol),
+    ]);
+    const newCandidates = [...candidateSet].filter(s => !coveredBase.has(s)).slice(0, 40);
+
+    if (newCandidates.length) {
+      const extra = await collectTechnicals({ candidates: newCandidates, skipBase: true });
+      technicals = mergeTechnicals(baseTechnicals, extra);
+    }
+  } catch (e) {
+    // Enrichment is best-effort — fall back to the base technicals block.
+    console.error('[inject] technicals enrichment failed:', e.message);
+  }
+
   const V2 = {
     meta: data.crucix, air, thermal, tSignals, chokepoints, nuke, nukeSignals,
     airMeta: {
@@ -619,13 +656,56 @@ export async function synthesize(data) {
     tg: { posts: tgData.totalPosts || 0, urgent: tgUrgent, topPosts: tgTop },
     who, fred, energy, metals, bls, treasury, gscpi, defense, noaa, epa, acled, gdelt, space, health, news,
     markets, // Live Yahoo Finance market data
-    sectorRotation: rankSectors(markets, { topN: 3 }),
+    sectorRotation,
+    // Bar-derived technicals (MA50/MA200, RSI14, RVOL, 52w hi/lo, breakouts/
+    // breakdowns + light OBV/$-vol flow). compactSweepForLLM formats them.
+    technicals,
+    // AlpacaMovers + BenzingaNews — broader equity universe + per-ticker
+    // catalyst attribution. Injected raw; compactSweepForLLM formats them.
+    marketMovers: data.sources.AlpacaMovers || null,
+    marketNews: data.sources.BenzingaNews || null,
+    portfolio: data.sources.AlpacaPortfolio || null,
+    cot: data.sources.CFTC_COT || null,
     ideas: [], ideasSource: 'disabled',
     // newsFeed for ticker (merged RSS + GDELT + Telegram)
     newsFeed: buildNewsFeed(news, gdeltData, tgUrgent, tgTop),
   };
 
   return V2;
+}
+
+// Merge the base technicals block (sector ETFs + mega-caps) with a supplemental
+// block computed for the day's movers/leaders/laggards. Dedupes by symbol,
+// re-sorts breakouts/breakdowns/flow, and rebuilds the summary.
+function mergeTechnicals(base, extra) {
+  if (!extra) return base;
+  if (!base) return extra;
+  const dedupeBy = (a = [], b = []) => {
+    const seen = new Set();
+    const out = [];
+    for (const item of [...a, ...b]) {
+      if (!item?.symbol || seen.has(item.symbol)) continue;
+      seen.add(item.symbol);
+      out.push(item);
+    }
+    return out;
+  };
+  const breakouts = dedupeBy(base.breakouts, extra.breakouts)
+    .sort((x, y) => (y.rvol ?? 0) - (x.rvol ?? 0));
+  const breakdowns = dedupeBy(base.breakdowns, extra.breakdowns)
+    .sort((x, y) => (y.rvol ?? 0) - (x.rvol ?? 0));
+  const flow = dedupeBy(base.flow, extra.flow);
+  return {
+    ...base,
+    universeSize: (base.universeSize || 0) + (extra.universeSize || 0),
+    computed: (base.computed || 0) + (extra.computed || 0),
+    breakouts,
+    breakdowns,
+    flow,
+    summary:
+      `${breakouts.length} breakouts, ${breakdowns.length} breakdowns, ` +
+      `${flow.length} flow notes (bar-derived, daily OHLCV — not institutional/dark-pool)`,
+  };
 }
 
 // === Unified News Feed for Ticker ===

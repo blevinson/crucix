@@ -43,6 +43,7 @@ import { briefing as space } from './sources/space.mjs';
 // === Tier 5: Live Market Data ===
 import { briefing as yfinance } from './sources/yfinance.mjs';
 import { briefing as alpacaMovers } from './sources/alpaca-movers.mjs';
+import { briefing as equityTechnicals } from './sources/equity-technicals.mjs';
 import { briefing as alpacaPortfolio } from './sources/alpaca-portfolio.mjs';
 import { briefing as benzingaNews } from './sources/benzinga-news.mjs';
 import { briefing as openbbCot } from './sources/openbb-cot.mjs';
@@ -112,6 +113,11 @@ export async function fullBriefing() {
     // Tier 5: Live Market Data
     runSource('YFinance', yfinance),
     runSource('AlpacaMovers', alpacaMovers),
+    // EquityTechnicals runs over the static base universe (sector ETFs +
+    // mega-caps) here — movers/sector leaders+laggards aren't known until the
+    // parallel sweep finishes, so inject.mjs synthesize() enriches the candidate
+    // set with those names after the sweep completes.
+    runSource('EquityTechnicals', equityTechnicals),
     runSource('AlpacaPortfolio', alpacaPortfolio),
     runSource('BenzingaNews', benzingaNews),
     runSource('CFTC_COT', openbbCot),

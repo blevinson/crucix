@@ -64,6 +64,20 @@ export const SECTOR_ETFS = [
   'XLE', 'XLB', 'XLI', 'XLY', 'XLP', 'XLV', 'XLF', 'XLK', 'XLC', 'XLU', 'XLRE',
 ];
 
+// Mega-cap single names tracked in the broad sweep — cheap proxies for sector
+// flow. Exported so the technicals source can build its candidate universe
+// without hand-duplicating the list.
+export const EQUITY_NAMES = [
+  'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA',
+  'XOM', 'CVX', 'JPM', 'UNH', 'V', 'WMT',
+];
+
+// Default technicals universe: sector ETFs + the mega-cap names. The technicals
+// source extends this with the day's movers / sector leaders+laggards passed in
+// via ctx. Kept distinct from the broad 5d quote sweep so the 1y pulls (heavier)
+// are scoped to symbols we actually compute MA200 / 52w / RVOL on.
+export const TECHNICALS_BASE_SYMBOLS = [...SECTOR_ETFS, ...EQUITY_NAMES];
+
 // GICS sector membership for the equities tracked here. Hand-maintained — keep
 // in sync if SYMBOLS gains tickers. Used to attribute single-name moves to
 // their sector when surfacing flow context.
@@ -93,6 +107,9 @@ async function fetchQuote(symbol) {
     const meta = result.meta || {};
     const quotes = result.indicators?.quote?.[0] || {};
     const closes = quotes.close || [];
+    const volumes = quotes.volume || [];
+    const highs = quotes.high || [];
+    const lows = quotes.low || [];
     const timestamps = result.timestamp || [];
 
     // Get current price and true 1-day previous close.
@@ -109,13 +126,17 @@ async function fetchQuote(symbol) {
     const change = price && prevClose ? price - prevClose : 0;
     const changePct = prevClose ? (change / prevClose) * 100 : 0;
 
-    // Build 5-day history
+    // Build 5-day history. Entries now carry volume/high/low in addition to
+    // close — additive, all existing consumers read only .close so this is safe.
     const history = [];
     for (let i = 0; i < timestamps.length; i++) {
       if (closes[i] != null) {
         history.push({
           date: new Date(timestamps[i] * 1000).toISOString().split('T')[0],
           close: Math.round(closes[i] * 100) / 100,
+          volume: volumes[i] != null ? Number(volumes[i]) : null,
+          high: highs[i] != null ? Math.round(highs[i] * 100) / 100 : null,
+          low: lows[i] != null ? Math.round(lows[i] * 100) / 100 : null,
         });
       }
     }
@@ -134,6 +155,53 @@ async function fetchQuote(symbol) {
     };
   } catch (e) {
     return { symbol, name: SYMBOLS[symbol] || symbol, error: e.message };
+  }
+}
+
+// Pull a 1-year daily history for a single symbol, with the OHLCV fields the
+// technicals source needs (MA50/MA200, RSI14, RVOL20, 52w hi/lo). Returns an
+// array of {date, close, volume, high, low} (volume/high/low may be null on
+// gappy bars — the technicals math is null-tolerant). Returns [] on failure.
+//
+// Kept separate from the broad 5d sweep on purpose: range=1y is ~252 bars per
+// symbol, so we only run it for the technicals universe, never the whole sweep.
+// Widening fetchQuote() to range=1y would also silently turn sector_rank's
+// pct5d (first->last close) into a 1-YEAR return — that function assumes the
+// 5d window. Don't do that; use this instead.
+export async function fetchHistory1y(symbol) {
+  try {
+    const url = `${BASE}/${encodeURIComponent(symbol)}?range=1y&interval=1d&includePrePost=false`;
+    const data = await safeFetch(url, {
+      timeout: 8000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+
+    const result = data?.chart?.result?.[0];
+    if (!result) return [];
+
+    const quotes = result.indicators?.quote?.[0] || {};
+    const closes = quotes.close || [];
+    const volumes = quotes.volume || [];
+    const highs = quotes.high || [];
+    const lows = quotes.low || [];
+    const timestamps = result.timestamp || [];
+
+    const history = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      if (closes[i] == null) continue; // skip halted/empty bars
+      history.push({
+        date: new Date(timestamps[i] * 1000).toISOString().split('T')[0],
+        close: Math.round(closes[i] * 100) / 100,
+        volume: volumes[i] != null ? Number(volumes[i]) : null,
+        high: highs[i] != null ? Math.round(highs[i] * 100) / 100 : null,
+        low: lows[i] != null ? Math.round(lows[i] * 100) / 100 : null,
+      });
+    }
+    return history;
+  } catch {
+    return [];
   }
 }
 
