@@ -16,6 +16,7 @@ import { MemoryManager } from './lib/delta/index.mjs';
 import { createLLMProvider } from './lib/llm/index.mjs';
 import { generateLLMIdeas } from './lib/llm/ideas.mjs';
 import { scoreIdeas } from './lib/synthesis/idea_score.mjs';
+import { applyBorrowGate } from './lib/synthesis/borrow_gate.mjs';
 import { emitIdeas, isGraphitiEmitEnabled } from './lib/graphiti_emit.mjs';
 import { TelegramAlerter } from './lib/alerts/telegram.mjs';
 import { DiscordAlerter } from './lib/alerts/discord.mjs';
@@ -558,6 +559,17 @@ async function runSweepCycle() {
           // on any internal error it returns the raw llmIdeas, so a scorer bug
           // cannot crash the sweep.
           const scoredIdeas = scoreIdeas(llmIdeas, synthesized);
+          // P4: deterministic post-LLM borrow gate. For every SHORT, verify
+          // borrowability via real Alpaca easy_to_borrow/shortable (same trading
+          // creds as the portfolio section); conservative mcap-floor fallback when
+          // unreachable. Downgrades unborrowable SHORT->WATCH (borrow_block) and
+          // flags squeeze risk on thin-float rich names. Runs AFTER scoreIdeas so
+          // it gates the SCORED array (evidence_score/grounding preserved) and its
+          // mutations ride into BOTH synthesized.ideas and the graphiti emit below.
+          // Fails closed (unverifiable short -> WATCH) and crash-safe (its own
+          // try/catch returns shorts ungated rather than killing the sweep). Do NOT
+          // re-run scoreIdeas after this — only tradability changed, not grounding.
+          await applyBorrowGate(scoredIdeas, synthesized);
           synthesized.ideas = scoredIdeas;
           synthesized.ideasSource = 'llm';
           console.log(`[Crucix] LLM generated ${scoredIdeas.length} ideas (scored: ` +
